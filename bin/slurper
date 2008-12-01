@@ -1,0 +1,108 @@
+#!/usr/bin/env ruby
+
+require "rubygems"
+require "maruku"
+require "fileutils"
+require "thor"
+require "ufo_compiler"
+
+module MaRuKu
+  module IgnorableCode
+    def to_html_code_using_pre(source)
+      ret = super
+      if node_type == :code
+        ret = ret.to_s
+        ret.gsub!(/!!-(.*?)-!!/) do |m|
+          REXML::Text.unnormalize($1)
+        end
+        REXML::Document.new(ret).root
+      else
+        ret
+      end
+    end
+  end
+  
+  class MDElement
+    include IgnorableCode
+  end
+end
+
+MaRuKu::In::Markdown.register_block_extension(
+  :regexp => /<(sidebar|note):".*?">/,
+  :handler => proc do |doc, src, context|
+    first_line = src.shift_line
+    first_line =~ /<(sidebar|note):"(.*?)">/
+    kind, subkind = $1, $2
+    lines = ["<p class='#{kind}_head'>#{$2}</p>"]
+
+    while src.cur_line && src.cur_line !~ /<\/(sidebar|note)>/
+      line = src.shift_line
+      lines.push line
+    end
+    
+    src.shift_line
+
+    src = MaRuKu::In::Markdown::BlockLevelParser::LineSource.new(lines)
+    children = doc.parse_blocks(src)
+    
+    context.push doc.md_el(:div, children, {}, {:class => "#{kind} #{subkind}"})
+    
+    true
+  end
+)
+
+module MaRuKu::Out::HTML
+
+  def to_html_div
+    add_ws(wrap_as_element('div'))
+  end
+
+  def to_html_header
+    element_name = "h#{self.level}" 
+    h = wrap_as_element element_name
+    
+    if span = render_section_number
+      h.insert_before(h.children.first, span)
+    end
+    ret = add_ws(h)
+    ret += [Element.new("hr"), Text.new("\n")] if self.level == 2
+    ret
+  end
+  
+end
+
+class Ufo < Thor
+  
+  desc "make_pdf GLOB CHAPTER BASE_DIR", "make a PDF for a group of files"
+  method_options :css => :optional, :todo => :boolean, :debug => :boolean
+  def make_pdf(glob, chapter, base_dir)
+    contents = ""
+    Dir[glob].each do |file|
+      contents << File.read(file)
+    end
+    results = Slurper.new(contents, 
+      :chapter => chapter, :base_dir => base_dir).
+      number_sections.to_s
+    results = Maruku.new(results).to_html
+
+    if options[:css]
+      css = options[:css] ? File.read(options[:css]) : ""
+      css << "\ndiv.TODO { display: none }\n" unless options[:todo]
+    end
+    
+    dst = options[:destination] || "output"
+    
+    File.open("#{dst}.html", "w") do |file|
+      file.puts "<html>\n<head>\n"
+      file.puts "<style>\n#{css}\n</style>\n</head>\n"
+      file.puts "<body>\n#{results}\n</body>"
+      file.puts "</html>"
+    end
+
+    puts %x{jruby -S make_pdf fly #{dst}.html #{dst}.pdf}
+    FileUtils.rm("#{dst}.html") unless options[:debug]
+  end
+  
+end
+
+Ufo.start
